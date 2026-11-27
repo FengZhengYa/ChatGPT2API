@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
@@ -8,6 +8,7 @@ from services.auth_service import auth_service
 
 from api.support import (
     require_admin,
+    require_identity,
     sanitize_cpa_pool,
     sanitize_cpa_pools,
     sanitize_sub2api_server,
@@ -26,20 +27,60 @@ from services.sub2api_service import (
 
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
+    key: str = ""
+    account_tier: str = "free"
+    image_daily_quota: int = 0
+    image_daily_unlimited: bool = True
+    image_monthly_quota: int = 0
+    image_monthly_unlimited: bool = True
+    image_total_quota: int = 0
+    image_total_unlimited: bool = False
+    chat_daily_quota: int = 0
+    chat_daily_unlimited: bool = True
+    chat_monthly_quota: int = 0
+    chat_monthly_unlimited: bool = True
+    chat_total_quota: int = 0
+    chat_total_unlimited: bool = True
 
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     key: str | None = None
+    account_tier: str | None = None
+    image_daily_quota: int | None = None
+    image_daily_unlimited: bool | None = None
+    image_monthly_quota: int | None = None
+    image_monthly_unlimited: bool | None = None
+    image_total_quota: int | None = None
+    image_total_unlimited: bool | None = None
+    chat_daily_quota: int | None = None
+    chat_daily_unlimited: bool | None = None
+    chat_monthly_quota: int | None = None
+    chat_monthly_unlimited: bool | None = None
+    chat_total_quota: int | None = None
+    chat_total_unlimited: bool | None = None
+    reset_image_daily_used: bool | None = None
+    reset_image_monthly_used: bool | None = None
+    reset_image_total_used: bool | None = None
+    reset_chat_daily_used: bool | None = None
+    reset_chat_monthly_used: bool | None = None
+    reset_chat_total_used: bool | None = None
+
+
+class UserKeyRegenerateRequest(BaseModel):
+    key: str = ""
 
 
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+    account_records: list[dict] = Field(default_factory=list)
+    source_type: str = "web"
 
 
 class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+    delete_mailboxes: bool = False
 
 
 class AccountRefreshRequest(BaseModel):
@@ -99,11 +140,63 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         return {"items": auth_service.list_keys(role="user")}
 
+    @router.get("/api/auth/me")
+    async def get_my_identity(response: Response, authorization: str | None = Header(default=None)):
+        # 余额会随每次画图 / 对话动态变化，不能让浏览器/SPA 兜底 HTML 缓存住，
+        # 否则前端永远显示老值。明确禁止任何中间层缓存。
+        response.headers["Cache-Control"] = "no-store"
+        identity = require_identity(authorization)
+        # admin 走 _legacy_admin_identity 不走 auth_service，没 id；前端按全档 unlimited=True 处理。
+        item_id = str(identity.get("id") or "").strip()
+        if not item_id or item_id == "admin":
+            payload: dict[str, object] = {
+                "id": item_id,
+                "name": identity.get("name"),
+                "role": identity.get("role"),
+                "account_tier": "premium",
+                "can_use_paid_image_accounts": True,
+                "can_use_high_resolution": True,
+            }
+            for kind in (
+                "image_daily",
+                "image_monthly",
+                "image_total",
+                "chat_daily",
+                "chat_monthly",
+                "chat_total",
+            ):
+                payload[f"{kind}_quota"] = 0
+                payload[f"{kind}_used"] = 0
+                payload[f"{kind}_unlimited"] = True
+                payload[f"{kind}_remaining"] = None
+            return {"identity": payload}
+        record = auth_service.get_by_id(item_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"error": "用户不存在"})
+        return {"identity": record}
+
     @router.post("/api/auth/users")
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            item, raw_key = auth_service.create_key(role="user", name=body.name)
+            item, raw_key = auth_service.create_key(
+                role="user",
+                name=body.name,
+                key=body.key,
+                account_tier=body.account_tier,
+                image_daily_quota=max(0, int(body.image_daily_quota or 0)),
+                image_daily_unlimited=bool(body.image_daily_unlimited),
+                image_monthly_quota=max(0, int(body.image_monthly_quota or 0)),
+                image_monthly_unlimited=bool(body.image_monthly_unlimited),
+                image_total_quota=max(0, int(body.image_total_quota or 0)),
+                image_total_unlimited=bool(body.image_total_unlimited),
+                chat_daily_quota=max(0, int(body.chat_daily_quota or 0)),
+                chat_daily_unlimited=bool(body.chat_daily_unlimited),
+                chat_monthly_quota=max(0, int(body.chat_monthly_quota or 0)),
+                chat_monthly_unlimited=bool(body.chat_monthly_unlimited),
+                chat_total_quota=max(0, int(body.chat_total_quota or 0)),
+                chat_total_unlimited=bool(body.chat_total_unlimited),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
@@ -115,15 +208,13 @@ def create_router() -> APIRouter:
             authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
-        updates = {
-            key: value
-            for key, value in {
-                "name": body.name,
-                "enabled": body.enabled,
-                "key": body.key,
-            }.items()
-            if value is not None
-        }
+        candidate = body.model_dump(exclude_none=True)
+        # 名称和 key 不能为空字符串触发改动；其余 bool / int 全部按字面值透传到 service。
+        updates: dict[str, object] = {key: value for key, value in candidate.items() if key not in {"name", "key"}}
+        if "name" in candidate:
+            updates["name"] = candidate["name"]
+        if "key" in candidate:
+            updates["key"] = candidate["key"]
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
         try:
@@ -141,6 +232,35 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
         return {"items": auth_service.list_keys(role="user")}
 
+    @router.get("/api/auth/users/{key_id}/key")
+    async def reveal_user_key(key_id: str, response: Response, authorization: str | None = Header(default=None)):
+        # 任何中间层缓存都禁掉：明文密钥不能被代理 / 浏览器留底。
+        response.headers["Cache-Control"] = "no-store"
+        require_admin(authorization)
+        result = auth_service.reveal_key(key_id, role="user")
+        if result is None:
+            raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
+        return result
+
+    @router.post("/api/auth/users/{key_id}/regenerate")
+    async def regenerate_user_key(
+        key_id: str,
+        response: Response,
+        body: UserKeyRegenerateRequest | None = None,
+        authorization: str | None = Header(default=None),
+    ):
+        response.headers["Cache-Control"] = "no-store"
+        require_admin(authorization)
+        custom_key = (body.key if body else "") or ""
+        try:
+            result = auth_service.regenerate_key(key_id, role="user", key=custom_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
+        item, raw_key = result
+        return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
+
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -150,9 +270,18 @@ def create_router() -> APIRouter:
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
+        account_records = [record for record in body.account_records if isinstance(record, dict)]
+        for record in account_records:
+            token = str(record.get("access_token") or record.get("accessToken") or "").strip()
+            if token:
+                tokens.append(token)
+        tokens = list(dict.fromkeys(tokens))
         if not tokens:
-            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        result = account_service.add_accounts(tokens)
+            raise HTTPException(status_code=400, detail={"error": "tokens or account_records is required"})
+        source_type = str(body.source_type or "web").strip().lower() or "web"
+        if source_type not in {"web", "codex"}:
+            raise HTTPException(status_code=400, detail={"error": "source_type must be web or codex"})
+        result = account_service.add_accounts(tokens, account_records=account_records, source_type=source_type)
         refresh_result = account_service.refresh_accounts(tokens)
         return {
             **result,
@@ -167,7 +296,7 @@ def create_router() -> APIRouter:
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return account_service.delete_accounts(tokens)
+        return account_service.delete_accounts(tokens, delete_mailboxes=body.delete_mailboxes)
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):

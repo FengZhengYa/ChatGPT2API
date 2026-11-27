@@ -24,6 +24,15 @@ export type StoredImage = {
 
 export type ImageTurnStatus = "queued" | "generating" | "success" | "error";
 
+// 回复上一轮 AI 反问/拒绝时携带的上下文。
+// 只用于在调用图片接口时拼接成模型可见的 prompt，不直接展示给用户。
+// turn.prompt 永远只存用户本人输入的原文。
+export type ImageReplyContext = {
+  sourceTurnId: string;
+  sourcePrompt: string;
+  aiMessage: string;
+};
+
 export type ImageTurn = {
   id: string;
   prompt: string;
@@ -32,12 +41,14 @@ export type ImageTurn = {
   referenceImages: StoredReferenceImage[];
   count: number;
   size: string;
+  resolution?: string;
   images: StoredImage[];
   createdAt: string;
   status: ImageTurnStatus;
   error?: string;
   promptDeleted?: boolean;
   resultsDeleted?: boolean;
+  replyContext?: ImageReplyContext;
 };
 
 export type ImageConversation = {
@@ -119,6 +130,21 @@ function getLegacyReferenceImages(source: Record<string, unknown>): StoredRefere
   return [];
 }
 
+function normalizeReplyContext(value: unknown): ImageReplyContext | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const ctx = value as Partial<ImageReplyContext>;
+  if (typeof ctx.sourceTurnId !== "string" || !ctx.sourceTurnId) {
+    return undefined;
+  }
+  return {
+    sourceTurnId: ctx.sourceTurnId,
+    sourcePrompt: typeof ctx.sourcePrompt === "string" ? ctx.sourcePrompt : "",
+    aiMessage: typeof ctx.aiMessage === "string" ? ctx.aiMessage : "",
+  };
+}
+
 function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
   const normalizedImages = Array.isArray(turn.images) ? turn.images.map(normalizeStoredImage) : [];
   const derivedStatus: ImageTurnStatus =
@@ -136,6 +162,7 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     referenceImages: getLegacyReferenceImages(turn),
     count: Math.max(1, Number(turn.count || normalizedImages.length || 1)),
     size: typeof turn.size === "string" ? turn.size : "",
+    resolution: typeof turn.resolution === "string" ? turn.resolution : "",
     images: normalizedImages,
     createdAt: String(turn.createdAt || new Date().toISOString()),
     status:
@@ -148,6 +175,7 @@ function normalizeTurn(turn: ImageTurn & Record<string, unknown>): ImageTurn {
     error: typeof turn.error === "string" ? turn.error : undefined,
     promptDeleted: turn.promptDeleted === true,
     resultsDeleted: turn.resultsDeleted === true,
+    replyContext: normalizeReplyContext(turn.replyContext),
   };
 }
 
@@ -163,6 +191,7 @@ function normalizeConversation(conversation: ImageConversation & Record<string, 
           referenceImages: getLegacyReferenceImages(conversation),
           count: Number(conversation.count || 1),
           size: typeof conversation.size === "string" ? conversation.size : "",
+          resolution: typeof conversation.resolution === "string" ? conversation.resolution : "",
           images: Array.isArray(conversation.images) ? (conversation.images as StoredImage[]) : [],
           createdAt: String(conversation.createdAt || new Date().toISOString()),
           status:

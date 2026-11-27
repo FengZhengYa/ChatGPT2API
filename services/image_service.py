@@ -10,6 +10,8 @@ from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
 from services.config import config
+from services.image_owners_service import load_owners, remove_owners
+from services.image_prompts_service import load_prompts, remove_prompts
 from services.image_tags_service import load_tags, remove_tags
 
 THUMBNAIL_SIZE = (320, 320)
@@ -109,9 +111,21 @@ def cleanup_image_thumbnails() -> int:
     return removed
 
 
-def _image_items(start_date: str = "", end_date: str = "") -> list[dict[str, object]]:
+def count_total_images() -> int:
+    """图片管理页"未归属"数量统计用：纯粹数 images_dir 下文件数。
+    比 _image_items 轻量，避开了打开文件取尺寸的 IO。"""
+    root = config.images_dir
+    if not root.exists():
+        return 0
+    return sum(1 for path in root.rglob("*") if path.is_file())
+
+
+def _image_items(start_date: str = "", end_date: str = "", owner: str = "", admin_ids: set[str] | None = None) -> list[dict[str, object]]:
     items = []
     root = config.images_dir
+    owner_filter = (owner or "").strip()
+    owners_map = load_owners() if owner_filter else {}
+    admin_set = admin_ids or set()
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -122,6 +136,19 @@ def _image_items(start_date: str = "", end_date: str = "") -> list[dict[str, obj
             continue
         if end_date and day > end_date:
             continue
+        if owner_filter:
+            owner_id = owners_map.get(rel, "")
+            # 前端约定的两个特殊桶：
+            #   __admin__   = 管理员生成（owner_id 落在 admin 集合里）
+            #   __unowned__ = 真孤儿（image_owners.json 里没记录，多半是老数据 / 写归属表失败）
+            if owner_filter == "__unowned__":
+                if owner_id:
+                    continue
+            elif owner_filter == "__admin__":
+                if owner_id not in admin_set:
+                    continue
+            elif owner_id != owner_filter:
+                continue
         dimensions = _image_dimensions(path)
         items.append({
             "rel": rel,
@@ -136,29 +163,57 @@ def _image_items(start_date: str = "", end_date: str = "") -> list[dict[str, obj
     return items
 
 
-def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict[str, object]:
+def list_images(
+    base_url: str,
+    start_date: str = "",
+    end_date: str = "",
+    owner: str = "",
+    admin_ids: set[str] | None = None,
+) -> dict[str, object]:
     config.cleanup_old_images()
     cleanup_image_thumbnails()
     all_tags = load_tags()
-    items = [
-        {
+    owners_map = load_owners()
+    prompts_map = load_prompts()
+    admin_set = admin_ids or set()
+    items = []
+    for item in _image_items(start_date, end_date, owner, admin_set):
+        rel = str(item["path"])
+        owner_id = owners_map.get(rel, "")
+        items.append({
             **item,
-            "url": f"{base_url.rstrip('/')}/images/{item['path']}",
-            "thumbnail_url": thumbnail_url(base_url, str(item["path"])),
-            "tags": all_tags.get(str(item["path"]), []),
-        }
-        for item in _image_items(start_date, end_date)
-    ]
+            "url": f"{base_url.rstrip('/')}/images/{rel}",
+            "thumbnail_url": thumbnail_url(base_url, rel),
+            "tags": all_tags.get(rel, []),
+            "owner_id": owner_id,
+            # 标记给前端：admin 桶里的图都用同一种 badge 文案"管理员"，不暴露具体 admin id
+            "is_admin_owner": bool(owner_id) and owner_id in admin_set,
+            # 生成时记下来的 prompt 原文。老数据没记录就空字符串。
+            # web "我的作品"页据此一键复用 / 发布画廊；为空时让前端弹窗手填。
+            "prompt": prompts_map.get(rel, ""),
+        })
     groups: dict[str, list[dict[str, object]]] = {}
     for item in items:
         groups.setdefault(str(item["date"]), []).append(item)
     return {"items": items, "groups": [{"date": key, "items": value} for key, value in groups.items()]}
 
 
-def delete_images(paths: list[str] | None = None, start_date: str = "", end_date: str = "", all_matching: bool = False) -> dict[str, int]:
+def delete_images(
+    paths: list[str] | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    owner: str = "",
+    all_matching: bool = False,
+    admin_ids: set[str] | None = None,
+) -> dict[str, int]:
     root = config.images_dir.resolve()
-    targets = [str(item["path"]) for item in _image_items(start_date, end_date)] if all_matching else (paths or [])
+    targets = (
+        [str(item["path"]) for item in _image_items(start_date, end_date, owner, admin_ids or set())]
+        if all_matching
+        else (paths or [])
+    )
     removed = 0
+    cleared_rels: list[str] = []
     for item in targets:
         path = (root / item).resolve()
         try:
@@ -171,7 +226,11 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
                 if thumbnail.is_file():
                     thumbnail.unlink()
             remove_tags(item)
+            cleared_rels.append(item)
             removed += 1
+    if cleared_rels:
+        remove_owners(cleared_rels)
+        remove_prompts(cleared_rels)
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(config.image_thumbnails_dir)
     return {"removed": removed}

@@ -22,6 +22,9 @@ class GitStorageBackend(StorageBackend):
         branch: str = "main",
         file_path: str = "accounts.json",
         auth_keys_file_path: str = "auth_keys.json",
+        gallery_file_path: str = "gallery.json",
+        chat_conversations_file_path: str = "chat_conversations.json",
+        cdk_codes_file_path: str = "cdk_codes.json",
         local_cache_dir: Path | None = None,
     ):
         self.repo_url = repo_url
@@ -29,6 +32,9 @@ class GitStorageBackend(StorageBackend):
         self.branch = branch
         self.file_path = file_path
         self.auth_keys_file_path = auth_keys_file_path
+        self.gallery_file_path = gallery_file_path
+        self.chat_conversations_file_path = chat_conversations_file_path
+        self.cdk_codes_file_path = cdk_codes_file_path
         
         # 本地缓存目录
         if local_cache_dir is None:
@@ -117,6 +123,52 @@ class GitStorageBackend(StorageBackend):
             print(f"[git-storage] save failed: {e}")
             raise e
 
+    def load_gallery_items(self) -> list[dict[str, Any]]:
+        """从 Git 仓库加载画廊条目"""
+        try:
+            return self._load_json_file(self.gallery_file_path)
+        except Exception as e:
+            print(f"[git-storage] load gallery failed: {e}")
+            raise
+
+    def save_gallery_items(self, items: list[dict[str, Any]]) -> None:
+        """保存画廊条目到 Git 仓库"""
+        try:
+            self._save_json_file(self.gallery_file_path, items, "Update gallery items")
+        except Exception as e:
+            print(f"[git-storage] save gallery failed: {e}")
+            raise e
+
+    def load_chat_conversations(self) -> list[dict[str, Any]]:
+        try:
+            return self._load_json_file(self.chat_conversations_file_path)
+        except Exception as e:
+            print(f"[git-storage] load chat_conversations failed: {e}")
+            raise
+
+    def save_chat_conversations(self, items: list[dict[str, Any]]) -> None:
+        try:
+            self._save_json_file(self.chat_conversations_file_path, items, "Update chat conversations")
+        except Exception as e:
+            print(f"[git-storage] save chat_conversations failed: {e}")
+            raise e
+
+    def load_cdk_codes(self) -> list[dict[str, Any]]:
+        """从 Git 仓库加载 CDK 兑换码数据"""
+        try:
+            return self._load_json_file(self.cdk_codes_file_path)
+        except Exception as e:
+            print(f"[git-storage] load cdk_codes failed: {e}")
+            return []
+
+    def save_cdk_codes(self, items: list[dict[str, Any]]) -> None:
+        """保存 CDK 兑换码数据到 Git 仓库"""
+        try:
+            self._save_json_file(self.cdk_codes_file_path, items, "Update CDK codes")
+        except Exception as e:
+            print(f"[git-storage] save cdk_codes failed: {e}")
+            raise e
+
     def _load_json_file(self, file_path: str) -> list[dict[str, Any]]:
         data = self._load_json_value(file_path)
         return data if isinstance(data, list) else []
@@ -152,6 +204,8 @@ class GitStorageBackend(StorageBackend):
                 "branch": self.branch,
                 "file_path": self.file_path,
                 "auth_keys_file_path": self.auth_keys_file_path,
+                "gallery_file_path": self.gallery_file_path,
+                "chat_conversations_file_path": self.chat_conversations_file_path,
                 "last_commit": repo.head.commit.hexsha[:8],
             }
         except Exception as e:
@@ -170,6 +224,8 @@ class GitStorageBackend(StorageBackend):
             "branch": self.branch,
             "file_path": self.file_path,
             "auth_keys_file_path": self.auth_keys_file_path,
+            "gallery_file_path": self.gallery_file_path,
+            "chat_conversations_file_path": self.chat_conversations_file_path,
         }
 
     @staticmethod

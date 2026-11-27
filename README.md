@@ -1,7 +1,15 @@
-<h1 align="center">ChatGPT2API</h1>
+<h1 align="center">
+  <img src="assets/logo.png" alt="ChatGPT2API" width="72" height="72" />
+  <br />
+  ChatGPT2API
+</h1>
 
 
 <p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
+
+<p align="center">
+  <img src="assets/hero.png" alt="ChatGPT2API" width="100%" />
+</p>
 
 > [!NOTE]
 > 本项目是基于 [basketikun/chatgpt2api](https://github.com/basketikun/chatgpt2api) 的二次开发版本，主要在前端 UI/UX、注册机、日志/图片管理等模块上做了增强与重构。
@@ -22,9 +30,6 @@
 
 > [!IMPORTANT]
 > 本项目基于对 ChatGPT 官网相关能力的逆向研究实现，存在账号受限、临时封禁或永久封禁的风险。请勿使用你自己的重要账号、常用账号或高价值账号进行测试。
-
-> [!CAUTION]
-> 旧版本存在已知漏洞，请尽快升级到最新版本。公网部署时请尽量不要放置敏感信息，并自行做好访问控制与隔离。
 
 ## 快速开始
 
@@ -92,6 +97,8 @@ environment:
 - `GET /v1/models` 实时同步上游可用模型（如 `gpt-5`、`gpt-5-mini`、`auto` 等，以你账号实际权限为准），并附带本地图片模型别名 `gpt-image-2`、`codex-gpt-image-2`
 - 文本类接口 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 的 `model` 字段直接透传给上游，可用模型范围由账号在 ChatGPT 网页端的权限决定
 - 图片类接口仅识别 `gpt-image-2`（映射到上游 `gpt-5-3` slug）与 `codex-gpt-image-2`（走 Codex 画图通道），其他模型名走图片接口会回落到 `auto`
+- 图片类接口支持 `size` 画幅参数（`1:1`、`16:9`、`9:16`、`4:3`、`3:4`）与 `resolution` 清晰度参数（`1k`、`2k`、`4k`）
+- `resolution=2k/4k` 会优先走 Codex 高清画图路线，并按 `Pro` → `Plus` → `Team` 的可用账号池筛选；高清路线失败时不会自动降级成普通 1K
 - 支持通过 `n` 一次返回多张生成结果（后端限制 1-4）
 - 支持 Codex 中的画图接口逆向，仅 `Plus` / `Team` / `Pro` 订阅可用，模型别名为 `codex-gpt-image-2`，与官网画图共用账号但额度独立
 
@@ -99,6 +106,7 @@ environment:
 
 - 内置在线画图工作台，支持文生图、图片编辑与多图组图编辑
 - 支持 `gpt-image-2`、`codex-gpt-image-2` 两种图片模型
+- 支持 1K / 2K / 4K 清晰度选择，普通用户自动锁定 1K，高级用户可使用 2K / 4K
 - 编辑模式支持参考图上传
 - 前端支持多图生成交互
 - 本地保存图片会话历史，支持回看、删除和清空
@@ -109,6 +117,7 @@ environment:
 - 自动刷新账号邮箱、类型、额度和恢复时间
 - 轮询可用账号执行图片生成与图片编辑
 - 遇到 Token 失效类错误时自动剔除无效 Token
+- 遇到图片生成 429 / `rate_limit_exceeded` / `usage_limit_reached` 时会标记该账号为限流，并按上游 reset header 自动恢复
 - 定时检查限流账号并自动刷新
 - 支持搜索、筛选、批量刷新、导出、手动编辑和清理账号
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 直接导入
@@ -133,13 +142,53 @@ environment:
 - 按日期范围检索
 - 单图删除与批量清理
 
+### CDK 管理
+
+- CDK 兑换码生成与管理，支持单次使用和多次使用两种模式
+- 批量生成 CDK，支持自定义过期时间和配额配置
+- 灵活的配额控制：日额度、月额度、总额度，支持独立开关
+- 管理端支持查看、编辑、删除 CDK（包括已使用的 CDK）
+- 用户端 CDK 兑换入口，自动创建账号并分配权限
+
 ### 配置与备份
 
-- 全局 `auth-key` + 用户级密钥二级权限体系（admin / user）
+- 全局 `auth-key` + 用户级密钥二级权限体系（admin / user），用户密钥可设置普通 / 高级等级
+- 普通用户只能使用 free 账号池和 1K 画图；高级用户可使用 Plus / Team / Pro 账号池与 2K / 4K 高清画图
 - 多种存储后端：`json` / `sqlite` / `postgres` / `git`
 - 全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理
 - Cloudflare R2 自动备份（可加密、可选项保留）
 - 全局系统提示词、敏感词过滤、可选的 AI 自动审查
+
+## 安卓客户端
+
+提供配套的安卓客户端 **Draw**，与本项目后端深度对接，覆盖文生图、图生图、画廊、作品管理等场景。
+
+> [!NOTE]
+> 安卓客户端为闭源发布，仅以 APK 形式在 [Releases](https://github.com/RemotePinee/ChatGPT2API/releases) 提供下载；本仓库不包含其源码。后端 API 完全开源，欢迎基于 [`docs/android-integration.md`](docs/android-integration.md) 自行实现客户端。
+
+### 下载安装
+
+1. 在 [Releases](https://github.com/RemotePinee/ChatGPT2API/releases) 页面下载最新版 `Draw-vX.Y.Z.apk`
+2. 安装后启动，首次进入填写：
+   - **后端地址**：你部署的 ChatGPT2API 实例地址（例如 `https://api.example.com`）
+   - **访问密钥**：管理员根 key（`config.json` 的 `auth-key`）或在设置页创建的 user 密钥
+
+### 主要能力
+
+- 文生图 / 图生图，支持参考图、风格预设、比例与张数选择
+- 支持 1K / 2K / 4K 清晰度选择，并根据用户密钥权限展示普通 / 高级用户状态
+- 公共画廊：浏览社区作品、一键复用 prompt、本人发布的可撤回
+- 我的作品：本地缓存 + 云端归属合并，重装 / 换设备不丢图
+- 后台生成：弹窗收起后任务继续跑，完成时全局 Toast 通知
+- 自动刷新可用额度，密钥失效或后端不可达时自动跳回登录页
+
+### 兼容性
+
+| 项 | 要求 |
+|---|---|
+| Android 最低版本 | 8.0（API 26） |
+| 后端版本 | 推荐与客户端发布日期相近的后端版本，至少需要支持 `/v1/images/*`、`/api/gallery/*`、`/api/me/images` 等接口 |
+| 网络 | 客户端走 HTTPS 时后端建议套一层反向代理；HTTP 仅建议局域网调试 |
 
 ## Screenshots
 
@@ -162,6 +211,18 @@ environment:
 图片管理：
 
 ![image-manager](assets/image-manager.png)
+
+CDK 管理：
+
+![cdk-manage](assets/cdk-manage.png)
+
+CDK 兑换：
+
+![cdk-reg](assets/cdk-reg.png)
+
+CDK 使用：
+
+![cdk-get](assets/cdk-get.png)
 
 ## API
 
@@ -209,6 +270,8 @@ curl http://localhost:8000/v1/images/generations \
     "model": "gpt-image-2",
     "prompt": "一只漂浮在太空里的猫",
     "n": 1,
+    "size": "1:1",
+    "resolution": "1k",
     "response_format": "b64_json"
   }'
 ```
@@ -222,6 +285,8 @@ curl http://localhost:8000/v1/images/generations \
 | `model`           | 图片模型，当前可用值以 `/v1/models` 返回结果为准，推荐使用 `gpt-image-2` |
 | `prompt`          | 图片生成提示词                                            |
 | `n`               | 生成数量，当前后端限制为 `1-4`                                 |
+| `size`            | 画幅比例，支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`               |
+| `resolution`      | 清晰度，支持 `1k`、`2k`、`4k`；`2k/4k` 需要高级用户权限与可用 Plus/Team/Pro 账号 |
 | `response_format` | 当前请求模型中包含该字段，默认值为 `b64_json`                       |
 
 <br>
@@ -240,6 +305,8 @@ curl http://localhost:8000/v1/images/edits \
   -F "model=gpt-image-2" \
   -F "prompt=把这张图改成赛博朋克夜景风格" \
   -F "n=1" \
+  -F "size=9:16" \
+  -F "resolution=1k" \
   -F "image=@./input.png"
 ```
 
@@ -252,6 +319,8 @@ curl http://localhost:8000/v1/images/edits \
 | `model`  | 图片模型， `gpt-image-2`                 |
 | `prompt` | 图片编辑提示词                             |
 | `n`      | 生成数量，当前后端限制为 `1-4`                  |
+| `size`   | 画幅比例，支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4` |
+| `resolution` | 清晰度，支持 `1k`、`2k`、`4k`；`2k/4k` 需要高级用户权限 |
 | `image`  | 需要编辑的图片文件，使用 multipart/form-data 上传 |
 
 <br>
@@ -330,3 +399,8 @@ curl http://localhost:8000/v1/responses \
 <br>
 </details>
 </details>
+
+## 友情链接
+
+- [LINUX DO - 新的理想型社区](https://linux.do/)
+

@@ -12,6 +12,7 @@ import {
   fetchBackups,
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
+  repairAbnormalAccounts,
   fetchSettingsConfig,
   runBackupNow,
   startRegister,
@@ -58,6 +59,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         image_tasks: true,
         accounts_snapshot: true,
         auth_keys_snapshot: true,
+        chat_conversations_snapshot: true,
         images: false,
       },
     };
@@ -65,6 +67,8 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
     image_retention_days: Number(config.image_retention_days || 30),
+    cleanup_protect_gallery: Boolean(config.cleanup_protect_gallery ?? true),
+    cleanup_protect_user_images: Boolean(config.cleanup_protect_user_images ?? true),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -102,10 +106,33 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         image_tasks: Boolean(backup.include?.image_tasks ?? true),
         accounts_snapshot: Boolean(backup.include?.accounts_snapshot ?? true),
         auth_keys_snapshot: Boolean(backup.include?.auth_keys_snapshot ?? true),
+        chat_conversations_snapshot: Boolean(backup.include?.chat_conversations_snapshot ?? true),
         images: Boolean(backup.include?.images ?? false),
       },
     },
   };
+}
+
+// 测试连接 / 立即备份前的本地必填校验：必须先有 R2 四要素 + bucket，
+// 否则别走 saveConfig，免得后端 200 返回触发"配置已保存"成功 toast，
+// 紧接着实际操作再报错，UI 同时冒两条互相打架的提示。
+function collectMissingBackupFields(backup: BackupSettings | undefined | null): string | null {
+  if (!backup) {
+    return "R2 备份配置";
+  }
+  const required: Array<{ key: keyof BackupSettings; label: string }> = [
+    { key: "account_id", label: "Cloudflare Account ID" },
+    { key: "access_key_id", label: "Access Key ID" },
+    { key: "secret_access_key", label: "Secret Access Key" },
+    { key: "bucket", label: "Bucket 名称" },
+  ];
+  const missing = required
+    .filter((item) => !String(backup[item.key] ?? "").trim())
+    .map((item) => item.label);
+  if (missing.length === 0) {
+    return null;
+  }
+  return missing.join("、");
 }
 
 function normalizeFiles(items: CPARemoteFile[]) {
@@ -129,6 +156,12 @@ type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
+  /**
+   * config 自上次成功 load / save 之后是否有改动。
+   * 任意 setXxx 都会置 true；loadConfig / saveConfig 成功后回 false。
+   * FloatingSaveBar 只有 isDirty=true 才浮现，干净状态下完全不占视觉位。
+   */
+  isDirty: boolean;
   backups: BackupItem[];
   backupState: BackupState | null;
   isLoadingBackups: boolean;
@@ -165,12 +198,16 @@ type SettingsStore = {
   initialize: () => Promise<void>;
   loadConfig: () => Promise<void>;
   saveConfig: () => Promise<boolean>;
+  /** 取消未保存修改：重新拉一次 config 把 dirty 打回去。 */
+  revertConfig: () => Promise<void>;
   loadBackups: (silent?: boolean) => Promise<void>;
   runBackup: () => Promise<void>;
   removeBackup: (key: string) => Promise<void>;
   testBackup: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
+  setCleanupProtectGallery: (value: boolean) => void;
+  setCleanupProtectUserImages: (value: boolean) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
@@ -193,6 +230,7 @@ type SettingsStore = {
   setRegisterTargetQuota: (value: string) => void;
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
+  setRegisterFixedPassword: (value: string) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
@@ -200,6 +238,7 @@ type SettingsStore = {
   saveRegister: () => Promise<void>;
   toggleRegister: () => Promise<void>;
   resetRegister: () => Promise<void>;
+  repairAbnormalRegisterAccounts: () => Promise<void>;
 
   loadPools: (silent?: boolean) => Promise<void>;
   openAddDialog: () => void;
@@ -226,6 +265,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
   isLoadingConfig: true,
   isSavingConfig: false,
+  isDirty: false,
   backups: [],
   backupState: null,
   isLoadingBackups: true,
@@ -286,8 +326,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     try {
       const data = await fetchSettingsConfig();
       const normalized = normalizeConfig(data.config);
+      // load 成功 = 当前内存 config 跟服务端一致，把 dirty 打回去
       set({
         config: normalized,
+        isDirty: false,
       });
     } catch (error) {
       if (!silent) {
@@ -297,6 +339,23 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!silent) {
         set({ isLoadingConfig: false });
       }
+    }
+  },
+
+  /**
+   * 取消未保存修改：重新拉一次 config 覆盖内存值，把 dirty 打回去。
+   * 走 loadConfig 同款路径，silent 模式不打扰用户。
+   */
+  revertConfig: async () => {
+    set({ config: null });
+    try {
+      const data = await fetchSettingsConfig();
+      set({
+        config: normalizeConfig(data.config),
+        isDirty: false,
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "撤销失败");
     }
   },
 
@@ -312,6 +371,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
+        cleanup_protect_gallery: Boolean(config.cleanup_protect_gallery ?? true),
+        cleanup_protect_user_images: Boolean(config.cleanup_protect_user_images ?? true),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
@@ -341,6 +402,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       });
       set({
         config: normalizeConfig(data.config),
+        isDirty: false,
       });
       toast.success("配置已保存");
       return true;
@@ -362,28 +424,37 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           ...state.config,
           refresh_account_interval_minute: value,
         },
+        isDirty: true,
       };
     });
   },
 
   setImageRetentionDays: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_retention_days: value } } : {});
+    set((state) => state.config ? { config: { ...state.config, image_retention_days: value }, isDirty: true } : {});
+  },
+
+  setCleanupProtectGallery: (value) => {
+    set((state) => state.config ? { config: { ...state.config, cleanup_protect_gallery: value }, isDirty: true } : {});
+  },
+
+  setCleanupProtectUserImages: (value) => {
+    set((state) => state.config ? { config: { ...state.config, cleanup_protect_user_images: value }, isDirty: true } : {});
   },
 
   setImagePollTimeoutSecs: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_poll_timeout_secs: value } } : {});
+    set((state) => state.config ? { config: { ...state.config, image_poll_timeout_secs: value }, isDirty: true } : {});
   },
 
   setImageAccountConcurrency: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value } } : {});
+    set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value }, isDirty: true } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {
-    set((state) => state.config ? { config: { ...state.config, auto_remove_invalid_accounts: value } } : {});
+    set((state) => state.config ? { config: { ...state.config, auto_remove_invalid_accounts: value }, isDirty: true } : {});
   },
 
   setAutoRemoveRateLimitedAccounts: (value) => {
-    set((state) => state.config ? { config: { ...state.config, auto_remove_rate_limited_accounts: value } } : {});
+    set((state) => state.config ? { config: { ...state.config, auto_remove_rate_limited_accounts: value }, isDirty: true } : {});
   },
 
   setLogLevel: (level, enabled) => {
@@ -392,7 +463,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const levels = new Set(state.config.log_levels || []);
       if (enabled) levels.add(level);
       else levels.delete(level);
-      return { config: { ...state.config, log_levels: Array.from(levels) } };
+      return { config: { ...state.config, log_levels: Array.from(levels) }, isDirty: true };
     });
   },
 
@@ -406,6 +477,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           ...state.config,
           proxy: value,
         },
+        isDirty: true,
       };
     });
   },
@@ -420,20 +492,21 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           ...state.config,
           base_url: value,
         },
+        isDirty: true,
       };
     });
   },
 
   setGlobalSystemPrompt: (value) => {
-    set((state) => state.config ? { config: { ...state.config, global_system_prompt: value } } : {});
+    set((state) => state.config ? { config: { ...state.config, global_system_prompt: value }, isDirty: true } : {});
   },
 
   setSensitiveWordsText: (value) => {
-    set((state) => state.config ? { config: { ...state.config, sensitive_words: value.split("\n") } } : {});
+    set((state) => state.config ? { config: { ...state.config, sensitive_words: value.split("\n") }, isDirty: true } : {});
   },
 
   setAIReviewField: (key, value) => {
-    set((state) => state.config ? { config: { ...state.config, ai_review: { ...(state.config.ai_review || {}), [key]: value } } } : {});
+    set((state) => state.config ? { config: { ...state.config, ai_review: { ...(state.config.ai_review || {}), [key]: value } }, isDirty: true } : {});
   },
 
   setBackupField: (key, value) => {
@@ -449,6 +522,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
             [key]: value,
           },
         },
+        isDirty: true,
       };
     });
   },
@@ -469,6 +543,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
             },
           },
         },
+        isDirty: true,
       };
     });
   },
@@ -497,6 +572,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   runBackup: async () => {
+    const missing = collectMissingBackupFields(get().config?.backup);
+    if (missing) {
+      toast.error(`请先填写${missing}`);
+      return;
+    }
     set({ isRunningBackup: true });
     try {
       const saved = await get().saveConfig();
@@ -527,6 +607,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   testBackup: async () => {
+    const missing = collectMissingBackupFields(get().config?.backup);
+    if (missing) {
+      toast.error(`请先填写${missing}`);
+      return;
+    }
     set({ isTestingBackup: true });
     try {
       const saved = await get().saveConfig();
@@ -584,6 +669,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setRegisterCheckInterval: (value) => {
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, check_interval: Number(value) || 0 } } : {});
+  },
+
+  setRegisterFixedPassword: (value) => {
+    set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, fixed_password: value } } : {});
   },
 
   setRegisterMailField: (key, value) => {
@@ -645,6 +734,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
         target_available: Math.max(1, Number(registerConfig.target_available) || 1),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+        fixed_password: registerConfig.fixed_password,
       });
       set({ registerConfig: data.register });
       toast.success("注册配置已保存");
@@ -670,6 +760,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
           target_available: Math.max(1, Number(registerConfig.target_available) || 1),
           check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+          fixed_password: registerConfig.fixed_password,
         });
       }
       const data = registerConfig.enabled ? await stopRegister() : await startRegister();
@@ -690,6 +781,40 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       toast.success("注册统计已重置");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "重置注册统计失败");
+    } finally {
+      set({ isSavingRegister: false });
+    }
+  },
+
+  repairAbnormalRegisterAccounts: async () => {
+    const { registerConfig } = get();
+    if (!registerConfig) return;
+    set({ isSavingRegister: true });
+    try {
+      if (registerConfig.enabled && registerConfig.stats?.job_kind === "repair_abnormal") {
+        const data = await stopRegister();
+        set({ registerConfig: data.register });
+        toast.success("已请求停止异常账号修复");
+        return;
+      }
+      if (!registerConfig.enabled) {
+        await updateRegisterConfig({
+          mail: registerConfig.mail,
+          proxy: registerConfig.proxy.trim(),
+          total: Math.max(1, Number(registerConfig.total) || 1),
+          threads: Math.max(1, Number(registerConfig.threads) || 1),
+          mode: registerConfig.mode,
+          target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
+          target_available: Math.max(1, Number(registerConfig.target_available) || 1),
+          check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+          fixed_password: registerConfig.fixed_password,
+        });
+      }
+      const data = await repairAbnormalAccounts();
+      set({ registerConfig: data.register });
+      toast.success(registerConfig.enabled ? "已有任务正在运行" : "已启动异常账号修复任务");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "启动异常账号修复失败");
     } finally {
       set({ isSavingRegister: false });
     }

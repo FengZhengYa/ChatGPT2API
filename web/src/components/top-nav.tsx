@@ -8,17 +8,27 @@ import { usePathname, useRouter } from "next/navigation";
 import { clearAuthSessionCache, getValidatedAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
+import { QuotaPopover } from "@/components/quota-popover";
 
 const adminNavItems = [
+  { href: "/chat", label: "对话" },
   { href: "/image", label: "画图" },
+  { href: "/gallery", label: "画廊" },
   { href: "/accounts", label: "号池管理" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
   { href: "/settings", label: "设置" },
+  { href: "/keys", label: "用户密钥" },
+  { href: "/cdk", label: "CDK 管理" },
 ];
 
-const userNavItems = [{ href: "/image", label: "画图" }];
+const userNavItems = [
+  { href: "/chat", label: "对话" },
+  { href: "/image", label: "画图" },
+  { href: "/works", label: "我的作品" },
+  { href: "/gallery", label: "画廊" },
+];
 
 // next.config.ts 配了 trailingSlash: true，usePathname 返回 "/image/"，
 // nav item 的 href 是 "/image"，直接 === 永远不命中。统一抹掉尾斜杠再比。
@@ -128,6 +138,9 @@ export function TopNav() {
   }
 
   const navItems = session.role === "admin" ? adminNavItems : userNavItems;
+  // 只有一个标签时（普通用户只能进画图）就别渲染导航条了，
+  // 单独一个"画图"挂在中间反而像 placeholder，logo 已经指向 /image 够用了。
+  const showNav = navItems.length > 1;
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
   const displayName = session.name.trim() || roleLabel;
 
@@ -142,7 +155,7 @@ export function TopNav() {
     <header className="fixed top-0 right-0 left-0 z-40 bg-background/25 backdrop-blur-[28px] backdrop-saturate-150">
       <div className="mx-auto flex h-12 max-w-[1440px] items-center gap-3 px-4 sm:h-14 sm:gap-4 sm:px-6 lg:px-8">
         <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-          <Link href="/image" className="group flex shrink-0 -translate-y-[1px] items-center py-1">
+          <Link href="/chat" className="group flex shrink-0 -translate-y-[1px] items-center py-1">
             <span className="text-[20px] font-bold leading-none tracking-[-0.025em] text-foreground">
               Chat
             </span>
@@ -158,7 +171,7 @@ export function TopNav() {
           </Link>
           <span className="hidden h-5 w-px bg-border lg:block" />
           <a
-            href="https://github.com/basketikun/chatgpt2api"
+            href="https://github.com/RemotePinee/ChatGPT2API"
             target="_blank"
             rel="noreferrer"
             className="hidden cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[13px] leading-none text-muted-foreground transition hover:bg-secondary hover:text-foreground lg:inline-flex"
@@ -168,6 +181,7 @@ export function TopNav() {
             <span className="translate-y-[1px]">GitHub</span>
           </a>
         </div>
+        {showNav ? (
         <nav
           ref={navRef}
           className="hide-scrollbar relative -mx-1 flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto px-1 sm:justify-center sm:gap-0.5 sm:overflow-visible sm:px-0"
@@ -216,6 +230,9 @@ export function TopNav() {
             }}
           />
         </nav>
+        ) : (
+          <div className="min-w-0 flex-1" aria-hidden />
+        )}
         <div className="flex shrink-0 items-center justify-end gap-2">
           <span className="hidden items-center gap-1.5 rounded-md border border-border/70 bg-card px-2 py-1 text-[11px] leading-none text-muted-foreground lg:inline-flex">
             <span className="relative flex size-1.5">
@@ -235,6 +252,7 @@ export function TopNav() {
                 <span className="hidden font-bold text-muted-foreground lg:inline">{roleLabel}</span>
               </>
             ) : null}
+            <QuotaPopover />
           </span>
           <button
             type="button"

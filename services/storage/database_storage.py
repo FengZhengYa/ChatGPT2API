@@ -30,6 +30,36 @@ class AuthKeyModel(Base):
     data = Column(Text, nullable=False)
 
 
+class GalleryItemModel(Base):
+    """画廊条目数据模型。
+    跟 accounts/auth_keys 一样的 (主键 + business_key + JSON data) 存储模式：
+    业务字段都塞进 data 的 JSON 里，列表/筛选靠 service 层在内存里排序分页。
+    数据量预期不大（公开发布 ≪ 全部生成），不必上索引/列拆分。
+    """
+    __tablename__ = "gallery_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    item_id = Column(String(64), unique=True, nullable=False, index=True)
+    data = Column(Text, nullable=False)
+
+
+class ChatConversationModel(Base):
+    __tablename__ = "chat_conversations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(String(64), unique=True, nullable=False, index=True)
+    data = Column(Text, nullable=False)
+
+
+class CDKCodeModel(Base):
+    """CDK 兑换码数据模型"""
+    __tablename__ = "cdk_codes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cdk_id = Column(String(64), unique=True, nullable=False, index=True)
+    data = Column(Text, nullable=False)
+
+
 class DatabaseStorageBackend(StorageBackend):
     """数据库存储后端（支持 SQLite、PostgreSQL、MySQL 等）"""
 
@@ -71,7 +101,29 @@ class DatabaseStorageBackend(StorageBackend):
         """保存鉴权密钥数据到数据库"""
         self._save_rows(AuthKeyModel, auth_keys, "id", "key_id")
 
-    def _load_rows(self, model: type[AccountModel] | type[AuthKeyModel]) -> list[dict[str, Any]]:
+    def load_gallery_items(self) -> list[dict[str, Any]]:
+        """从数据库加载画廊条目"""
+        return self._load_rows(GalleryItemModel)
+
+    def save_gallery_items(self, items: list[dict[str, Any]]) -> None:
+        """保存画廊条目到数据库"""
+        self._save_rows(GalleryItemModel, items, "id", "item_id")
+
+    def load_chat_conversations(self) -> list[dict[str, Any]]:
+        return self._load_rows(ChatConversationModel)
+
+    def save_chat_conversations(self, items: list[dict[str, Any]]) -> None:
+        self._save_rows(ChatConversationModel, items, "id", "conversation_id")
+
+    def load_cdk_codes(self) -> list[dict[str, Any]]:
+        """从数据库加载 CDK 兑换码数据"""
+        return self._load_rows(CDKCodeModel)
+
+    def save_cdk_codes(self, items: list[dict[str, Any]]) -> None:
+        """保存 CDK 兑换码数据到数据库"""
+        self._save_rows(CDKCodeModel, items, "id", "cdk_id")
+
+    def _load_rows(self, model: type[AccountModel] | type[AuthKeyModel] | type[GalleryItemModel] | type[ChatConversationModel] | type[CDKCodeModel]) -> list[dict[str, Any]]:
         session = self.Session()
         try:
             items = []
@@ -88,7 +140,7 @@ class DatabaseStorageBackend(StorageBackend):
 
     def _save_rows(
         self,
-        model: type[AccountModel] | type[AuthKeyModel],
+        model: type[AccountModel] | type[AuthKeyModel] | type[GalleryItemModel] | type[ChatConversationModel],
         items: list[dict[str, Any]],
         source_key: str,
         target_key: str | None = None,
@@ -124,12 +176,16 @@ class DatabaseStorageBackend(StorageBackend):
                 session.execute(text("SELECT 1"))
                 count = session.query(AccountModel).count()
                 auth_key_count = session.query(AuthKeyModel).count()
+                gallery_count = session.query(GalleryItemModel).count()
+                chat_conversation_count = session.query(ChatConversationModel).count()
                 return {
                     "status": "healthy",
                     "backend": "database",
                     "database_url": self._mask_password(self.database_url),
                     "account_count": count,
                     "auth_key_count": auth_key_count,
+                    "gallery_count": gallery_count,
+                    "chat_conversation_count": chat_conversation_count,
                 }
             finally:
                 session.close()
